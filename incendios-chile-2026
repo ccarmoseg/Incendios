@@ -1,0 +1,277 @@
+// =============================================================================
+// ANÁLISIS DE INCENDIOS FORESTALES CHILE 2026
+// Región de O'Higgins a Región de Los Lagos
+// =============================================================================
+
+// Definir área de estudio
+var geometry = ee.Geometry.Rectangle([-73.5, -42.0, -70.5, -33.8]);
+
+// Función para enmascarar nubes
+function maskS2clouds(image) {
+  var qa = image.select('QA60');
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
+      .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
+  return image.updateMask(mask)
+    .select(['B.*'])
+    .copyProperties(image, ['system:time_start']);
+}
+
+// Obtener imágenes PRE-incendio
+var datasetPre = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+    .filterBounds(geometry)
+    .filterDate('2025-12-01', '2026-01-01')
+    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+    .map(maskS2clouds);
+
+// Obtener imágenes POST-incendio
+var datasetPost = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+    .filterBounds(geometry)
+    .filterDate('2026-01-17', '2026-01-28')
+    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30))
+    .map(maskS2clouds);
+
+// Obtener imágenes compuestas
+var imagePre = datasetPre.median();
+var imagePost = datasetPost.median();
+
+// Calcular NBR
+var nbrPre = imagePre.normalizedDifference(['B8', 'B12']).rename('NBR_pre');
+var nbrPost = imagePost.normalizedDifference(['B8', 'B12']).rename('NBR_post');
+
+// Calcular NDVI
+var ndviPre = imagePre.normalizedDifference(['B8', 'B4']).rename('NDVI_pre');
+var ndviPost = imagePost.normalizedDifference(['B8', 'B4']).rename('NDVI_post');
+
+// Calcular dNBR (diferencia)
+var dNBR = nbrPre.subtract(nbrPost).rename('dNBR');
+
+// Clasificar severidad de quema basada en dNBR
+var burnSeverity = dNBR.expression(
+  'dNBR < 0.1 ? 0 : dNBR < 0.27 ? 1 : dNBR < 0.44 ? 2 : dNBR < 0.66 ? 3 : 4',
+  {'dNBR': dNBR}
+);
+
+
+// Parámetros de visualización para NBR
+var nbrVis = {
+  min: -1,
+  max: 1,
+  palette: [
+    'red',
+    'orange',
+    'yellow',
+    'yellowgreen',
+    'green',
+    'darkgreen'
+  ]
+};
+
+// Parámetros de visualización para NDVI
+var ndviVis = {
+  min: -0.2,
+  max: 0.8,
+  palette: [
+    'brown',
+    'red',
+    'yellow',
+    'yellowgreen',
+    'green',
+    'darkgreen'
+  ]
+};
+
+// Parámetros de visualización para dNBR
+var dNBRVis = {
+  min: -0.5,
+  max: 1.3,
+  palette: [
+    'green',
+    'yellow',
+    'orange',
+    'red',
+    'darkred',
+    'purple'
+  ]
+};
+
+// Visualización RGB normal
+Map.setCenter(-72.0, -37.0, 8);
+
+Map.addLayer(imagePre, {
+  bands: ['B4', 'B3', 'B2'],
+  min: 0,
+  max: 3000
+}, 'RGB PRE-incendio', false);
+
+Map.addLayer(imagePost, {
+  bands: ['B4', 'B3', 'B2'],
+  min: 0,
+  max: 3000
+}, 'RGB POST-incendio', false);
+
+// Visualización Falso Color (SWIR/NIR/Red) - Mejor para detectar incendios
+Map.addLayer(imagePre, {
+  bands: ['B12', 'B8', 'B4'],
+  min: 0,
+  max: 3000
+}, 'Falso Color PRE-incendio', false);
+
+Map.addLayer(imagePost, {
+  bands: ['B12', 'B8', 'B4'],
+  min: 0,
+  max: 3000
+}, 'Falso Color POST-incendio', true);
+
+// Añadir capas de índices
+Map.addLayer(nbrPre, nbrVis, 'NBR PRE-incendio', false);
+Map.addLayer(nbrPost, nbrVis, 'NBR POST-incendio', false);
+Map.addLayer(ndviPre, ndviVis, 'NDVI PRE-incendio', false);
+Map.addLayer(ndviPost, ndviVis, 'NDVI POST-incendio', false);
+Map.addLayer(dNBR, dNBRVis, 'dNBR (Cambio NBR)', true);
+
+// Añadir funcionalidad para inspeccionar valores
+Map.onClick(function(coords) {
+  var point = ee.Geometry.Point(coords.lon, coords.lat);
+  var sampledPoint = ee.Image.cat(nbrPre, nbrPost, ndviPre, ndviPost, dNBR, burnSeverity, ndwiPost)
+    .sample(point, 30);
+  
+  sampledPoint.evaluate(function(result) {
+    if (result.features && result.features.length > 0) {
+      var props = result.features[0].properties;
+      print('═══════════════════════════════════');
+      print('Coordenadas:', coords.lon.toFixed(4), ',', coords.lat.toFixed(4));
+      print('NBR PRE:', props.NBR_pre ? props.NBR_pre.toFixed(3) : 'N/A');
+      print('NBR POST:', props.NBR_post ? props.NBR_post.toFixed(3) : 'N/A');
+      print('dNBR:', props.dNBR ? props.dNBR.toFixed(3) : 'N/A');
+      print('NDVI PRE:', props.NDVI_pre ? props.NDVI_pre.toFixed(3) : 'N/A');
+      print('NDVI POST:', props.NDVI_post ? props.NDVI_post.toFixed(3) : 'N/A');
+      print('NDWI (Agua):', props.NDWI ? props.NDWI.toFixed(3) : 'N/A');
+      print('═══════════════════════════════════');
+    }
+  });
+});
+
+// Función para exportar capas como GeoTIFF
+function exportLayers() {
+  // ========== CAPAS PRE-INCENDIO ==========
+  
+  // Exportar RGB PRE
+  Export.image.toDrive({
+    image: imagePre.select(['B4', 'B3', 'B2']),
+    description: 'Chile_Incendios_2026_RGB_PRE',
+    folder: 'Incendios_Chile_2026',
+    scale: 10,
+    region: geometry,
+    crs: 'EPSG:4326',
+    maxPixels: 1e13,
+    fileFormat: 'GeoTIFF'
+  });
+  
+  // Exportar NBR PRE
+  Export.image.toDrive({
+    image: nbrPre,
+    description: 'Chile_Incendios_2026_NBR_PRE',
+    folder: 'Incendios_Chile_2026',
+    scale: 20,
+    region: geometry,
+    crs: 'EPSG:4326',
+    maxPixels: 1e13,
+    fileFormat: 'GeoTIFF'
+  });
+  
+  // Exportar NDVI PRE
+  Export.image.toDrive({
+    image: ndviPre,
+    description: 'Chile_Incendios_2026_NDVI_PRE',
+    folder: 'Incendios_Chile_2026',
+    scale: 10,
+    region: geometry,
+    crs: 'EPSG:4326',
+    maxPixels: 1e13,
+    fileFormat: 'GeoTIFF'
+  });
+  
+  // ========== CAPAS POST-INCENDIO ==========
+  
+  // Exportar RGB POST
+  Export.image.toDrive({
+    image: imagePost.select(['B4', 'B3', 'B2']),
+    description: 'Chile_Incendios_2026_RGB_POST',
+    folder: 'Incendios_Chile_2026',
+    scale: 10,
+    region: geometry,
+    crs: 'EPSG:4326',
+    maxPixels: 1e13,
+    fileFormat: 'GeoTIFF'
+  });
+  
+  // Exportar NBR POST
+  Export.image.toDrive({
+    image: nbrPost,
+    description: 'Chile_Incendios_2026_NBR_POST',
+    folder: 'Incendios_Chile_2026',
+    scale: 20,
+    region: geometry,
+    crs: 'EPSG:4326',
+    maxPixels: 1e13,
+    fileFormat: 'GeoTIFF'
+  });
+  
+  // Exportar NDVI POST
+  Export.image.toDrive({
+    image: ndviPost,
+    description: 'Chile_Incendios_2026_NDVI_POST',
+    folder: 'Incendios_Chile_2026',
+    scale: 10,
+    region: geometry,
+    crs: 'EPSG:4326',
+    maxPixels: 1e13,
+    fileFormat: 'GeoTIFF'
+  });
+  
+  // ========== CAPAS DE ANÁLISIS ==========
+  
+  // Exportar dNBR
+  Export.image.toDrive({
+    image: dNBR,
+    description: 'Chile_Incendios_2026_dNBR',
+    folder: 'Incendios_Chile_2026',
+    scale: 20,
+    region: geometry,
+    crs: 'EPSG:4326',
+    maxPixels: 1e13,
+    fileFormat: 'GeoTIFF'
+  });
+  
+  // Exportar Severidad
+  Export.image.toDrive({
+    image: burnSeverity,
+    description: 'Chile_Incendios_2026_Severidad',
+    folder: 'Incendios_Chile_2026',
+    scale: 20,
+    region: geometry,
+    crs: 'EPSG:4326',
+    maxPixels: 1e13,
+    fileFormat: 'GeoTIFF'
+  });
+  
+  print('✓ Tareas de exportación enviadas a "Tasks"');
+  print('✓ Total de capas: 8 (3 PRE + 3 POST + 2 Análisis)');
+}
+
+// Crear un botón para iniciar la exportación
+var exportButton = ui.Button({
+  label: 'Exportar Capas como GeoTIFF',
+  onClick: exportLayers,
+  style: {
+    position: 'top-right'
+  }
+});
+
+Map.add(exportButton);
+
+print('Imágenes PRE-incendio encontradas:', datasetPre.size());
+print('Imágenes POST-incendio encontradas:', datasetPost.size());
+print('Script cargado. Haz clic en el mapa para ver valores.');
